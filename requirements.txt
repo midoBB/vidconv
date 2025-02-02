@@ -1,0 +1,8 @@
+altgraph==0.17.4
+click==8.1.8
+packaging==24.2
+pyinstaller==6.11.1
+pyinstaller-hooks-contrib==2025.1
+python-magic==0.4.27
+setuptools==75.8.0
+tqdm==4.67.1

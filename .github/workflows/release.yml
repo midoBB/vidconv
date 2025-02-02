@@ -11,11 +11,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Get Python version from mise
+        id: get_python_version
+        run: |
+          PYTHON_VERSION=$(grep -oP 'python = "\K[\d\.]+' mise.toml)
+          echo "PYTHON_VERSION=$PYTHON_VERSION" >> $GITHUB_OUTPUT
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ steps.get_python_version.outputs.PYTHON_VERSION }}
+
 
       - name: Install dependencies
         run: |

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import shutil
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import click
@@ -8,6 +10,39 @@ from magic import Magic
 from tqdm import tqdm
 
 ERROR_LOG = "vidconv_errors.log"
+# Global variables for signal handling
+current_process = None
+current_output = None
+
+
+def signal_handler(sig, frame):
+    """Handle signals and clean up resources"""
+    global current_process, current_output
+
+    if current_process is not None:
+        # Terminate the running ffmpeg process
+        current_process.terminate()
+        try:
+            current_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            current_process.kill()
+
+    # Clean up unfinished output file
+    if current_output and current_output.exists():
+        try:
+            current_output.unlink()
+            print(f"\nRemoved incomplete file: {current_output}")
+        except Exception as e:
+            print(f"\nError removing incomplete file: {e}")
+
+    # Remove error log if empty
+    if Path(ERROR_LOG).exists() and Path(ERROR_LOG).stat().st_size == 0:
+        Path(ERROR_LOG).unlink()
+
+    print("\nExiting due to interrupt...")
+    sys.exit(1)
+
+
 
 
 def get_video_files(directory):
@@ -21,6 +56,18 @@ def get_video_files(directory):
             if mimetype.startswith("video/"):
                 videos.append(file)
 
+    return videos
+
+
+def get_only_video_files(inputs):
+    """Get only video files from a list of inputs"""
+    videos = []
+    mime = Magic(mime=True)
+    for input in inputs:
+        if input.is_file():
+            mimetype = mime.from_file(input)
+            if mimetype.startswith("video/"):
+                videos.append(input)
     return videos
 
 
@@ -47,9 +94,17 @@ def convert_time_to_seconds(time_str):
 
 
 def run_ffmpeg_hw(
-    input_file, output_file, width, height, bitrate, framerate, duration, progress_bar: tqdm
+    input_file,
+    output_file,
+    width,
+    height,
+    bitrate,
+    framerate,
+    duration,
+    progress_bar: tqdm,
 ):
     """Run FFmpeg with hardware acceleration and track progress"""
+    global current_process
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -92,10 +147,12 @@ def run_ffmpeg_hw(
     ]
 
     try:
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, bufsize=1)
+        current_process = subprocess.Popen(
+            cmd, stderr=subprocess.PIPE, text=True, bufsize=1
+        )
         stderr_lines = []
         while True:
-            line = process.stderr.readline()
+            line = current_process.stderr.readline()
             if not line:
                 break
             line = line.strip()
@@ -108,9 +165,9 @@ def run_ffmpeg_hw(
                     delta = current_percent - progress_bar.n
                     if delta > 0:
                         progress_bar.update(delta)
-        process.wait()
+        current_process.wait()
         progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
-        if process.returncode != 0:
+        if current_process.returncode != 0:
             log_error(input_file, "\n".join(stderr_lines))
             return False
         return True
@@ -123,6 +180,7 @@ def run_ffmpeg_sw(
     input_file, output_file, width, height, bitrate, framerate, duration, progress_bar
 ):
     """Run FFmpeg with software encoding and track progress"""
+    global current_process
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -163,10 +221,12 @@ def run_ffmpeg_sw(
     ]
 
     try:
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, bufsize=1)
+        current_process = subprocess.Popen(
+            cmd, stderr=subprocess.PIPE, text=True, bufsize=1
+        )
         stderr_lines = []
         while True:
-            line = process.stderr.readline()
+            line = current_process.stderr.readline()
             if not line:
                 break
             line = line.strip()
@@ -179,9 +239,9 @@ def run_ffmpeg_sw(
                     delta = current_percent - progress_bar.n
                     if delta > 0:
                         progress_bar.update(delta)
-        process.wait()
+        current_process.wait()
         progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
-        if process.returncode != 0:
+        if current_process.returncode != 0:
             log_error(input_file, "\n".join(stderr_lines))
             return False
         return True
@@ -326,6 +386,7 @@ def process_file(
     Returns:
       bool: True if the processing was successful, False otherwise.
     """
+    global current_process, current_output
 
     try:
         codec, width, height, framerate = get_video_info(file_path)
@@ -348,6 +409,7 @@ def process_file(
 
     # Determine output path
     output_path = file_path.with_stem(f"{file_path.stem}-720").with_suffix(".mp4")
+    current_output = output_path
 
     # Determine orientation
     if height > width:  # Vertical
@@ -362,29 +424,40 @@ def process_file(
         framerate = 24
 
     # Try hardware encoding first if enabled
-    progress_bar.write(f"Processing: {file_path.name}")
-    with tqdm(
-        total=100,
-        desc=f"Converting {file_path.name[:15]}",
-        unit="%",
-        leave=False,
-        bar_format='{l_bar}{bar}| {n:.1f}%/{total}% [{elapsed}<{remaining}]'
-    ) as file_pbar:
-        if not no_hw and codec in ("hevc", "av1"):
-            success = run_ffmpeg_hw(
-                file_path,
-                output_path,
-                new_width,
-                new_height,
-                bitrate,
-                framerate,
-                duration,
-                file_pbar,
-            )
-            if not success:
-                progress_bar.write(
-                    f"Hardware encoding failed for {file_path.name}, trying software..."
+    try:
+        with tqdm(
+            total=100,
+            desc=f"Converting {file_path.name}",
+            unit="%",
+            leave=False,
+            bar_format="{l_bar}{bar}| {n:.1f}%/{total}% [{elapsed}]",
+        ) as file_pbar:
+            if not no_hw and codec in ("hevc", "av1"):
+                success = run_ffmpeg_hw(
+                    file_path,
+                    output_path,
+                    new_width,
+                    new_height,
+                    bitrate,
+                    framerate,
+                    duration,
+                    file_pbar,
                 )
+                if not success:
+                    progress_bar.write(
+                        f"Hardware encoding failed for {file_path.name}, trying software..."
+                    )
+                    success = run_ffmpeg_sw(
+                        file_path,
+                        output_path,
+                        new_width,
+                        new_height,
+                        bitrate,
+                        framerate,
+                        duration,
+                        file_pbar,
+                    )
+            else:
                 success = run_ffmpeg_sw(
                     file_path,
                     output_path,
@@ -395,17 +468,11 @@ def process_file(
                     duration,
                     file_pbar,
                 )
-        else:
-            success = run_ffmpeg_sw(
-                file_path,
-                output_path,
-                new_width,
-                new_height,
-                bitrate,
-                framerate,
-                duration,
-                file_pbar,
-            )
+    except KeyboardInterrupt:
+        return False
+    finally:
+        current_process = None
+        current_output = None
     if success:
         if not keep:
             shutil.move(output_path, file_path)
@@ -451,6 +518,9 @@ def process_file(
 )
 def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     """Video conversion tool with hardware/software encoding support"""
+# Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     if cutoff is None:
         cutoff = bitrate + 500
     # Initialize error log
@@ -468,7 +538,7 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
             click.echo("No video files found in current directory.")
             return
     elif input_path:
-        video_files = [Path(file) for file in input_path]
+        video_files = get_only_video_files([Path(file) for file in input_path])
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 

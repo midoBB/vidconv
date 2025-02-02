@@ -24,8 +24,32 @@ def get_video_files(directory):
     return videos
 
 
-def run_ffmpeg_hw(input_file, output_file, width, height, bitrate, framerate):
-    """Run FFmpeg with hardware acceleration"""
+def convert_time_to_seconds(time_str):
+    """Convert FFmpeg time string (HH:MM:SS.ms) to total seconds"""
+    try:
+        parts = time_str.split(":")
+        hours, minutes, rest = 0, 0, "0"
+        if len(parts) == 3:
+            hours, minutes, rest = parts
+        elif len(parts) == 2:
+            minutes, rest = parts
+        else:
+            rest = parts[0]
+
+        seconds_parts = rest.split(".")
+        seconds = int(seconds_parts[0])
+        milliseconds = (
+            int(seconds_parts[1].ljust(3, "0")[:3]) if len(seconds_parts) > 1 else 0
+        )
+        return int(hours) * 3600 + int(minutes) * 60 + seconds + milliseconds / 1000
+    except Exception:
+        return 0
+
+
+def run_ffmpeg_hw(
+    input_file, output_file, width, height, bitrate, framerate, duration, progress_bar: tqdm
+):
+    """Run FFmpeg with hardware acceleration and track progress"""
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -68,15 +92,37 @@ def run_ffmpeg_hw(input_file, output_file, width, height, bitrate, framerate):
     ]
 
     try:
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, bufsize=1)
+        stderr_lines = []
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                break
+            line = line.strip()
+            stderr_lines.append(line)
+            if "time=" in line:
+                time_str = line.split("time=")[1].split()[0]
+                current_time = convert_time_to_seconds(time_str)
+                if duration > 0:
+                    current_percent = min((current_time / duration) * 100, 100.0)
+                    delta = current_percent - progress_bar.n
+                    if delta > 0:
+                        progress_bar.update(delta)
+        process.wait()
+        progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
+        if process.returncode != 0:
+            log_error(input_file, "\n".join(stderr_lines))
+            return False
         return True
-    except subprocess.CalledProcessError as e:
-        log_error(input_file, e.stderr.decode())
+    except Exception as e:
+        log_error(input_file, str(e))
         return False
 
 
-def run_ffmpeg_sw(input_file, output_file, width, height, bitrate, framerate):
-    """Run FFmpeg with software encoding"""
+def run_ffmpeg_sw(
+    input_file, output_file, width, height, bitrate, framerate, duration, progress_bar
+):
+    """Run FFmpeg with software encoding and track progress"""
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -117,10 +163,30 @@ def run_ffmpeg_sw(input_file, output_file, width, height, bitrate, framerate):
     ]
 
     try:
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, bufsize=1)
+        stderr_lines = []
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                break
+            line = line.strip()
+            stderr_lines.append(line)
+            if "time=" in line:
+                time_str = line.split("time=")[1].split()[0]
+                current_time = convert_time_to_seconds(time_str)
+                if duration > 0:
+                    current_percent = min((current_time / duration) * 100, 100.0)
+                    delta = current_percent - progress_bar.n
+                    if delta > 0:
+                        progress_bar.update(delta)
+        process.wait()
+        progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
+        if process.returncode != 0:
+            log_error(input_file, "\n".join(stderr_lines))
+            return False
         return True
-    except subprocess.CalledProcessError as e:
-        log_error(input_file, e.stderr.decode())
+    except Exception as e:
+        log_error(input_file, str(e))
         return False
 
 
@@ -201,6 +267,26 @@ def get_bitrate(file_path: Path) -> int:
     return bitrate_bps // 1000
 
 
+def get_duration(file_path: Path) -> float:
+    """
+    Retrieves the video duration in seconds using ffprobe.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(file_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFprobe error: {result.stderr.decode()}")
+    return float(result.stdout.decode().strip())
+
+
 def log_error(file_path, error_msg):
     """Log errors to the error log file"""
     with open(ERROR_LOG, "a") as f:
@@ -243,6 +329,7 @@ def process_file(
 
     try:
         codec, width, height, framerate = get_video_info(file_path)
+        duration = get_duration(file_path)
     except RuntimeError as e:
         progress_bar.write(f"Skipping {file_path.name}: {str(e)}")
         return False
@@ -260,8 +347,7 @@ def process_file(
             return True
 
     # Determine output path
-    output_path = file_path.with_stem(f"{file_path.stem}-720")
-    output_path = output_path.with_suffix(".mp4")
+    output_path = file_path.with_stem(f"{file_path.stem}-720").with_suffix(".mp4")
 
     # Determine orientation
     if height > width:  # Vertical
@@ -276,24 +362,65 @@ def process_file(
         framerate = 24
 
     # Try hardware encoding first if enabled
-    success = False
-    if not no_hw and codec in ("hevc", "av1"):
-        success = run_ffmpeg_hw(
-            file_path, output_path, new_width, new_height, bitrate, framerate
-        )
-        if not success:
-            progress_bar.write(
-                f"Hardware encoding failed for {file_path.name}, trying software..."
+    progress_bar.write(f"Processing: {file_path.name}")
+    with tqdm(
+        total=100,
+        desc=f"Converting {file_path.name[:15]}",
+        unit="%",
+        leave=False,
+        bar_format='{l_bar}{bar}| {n:.1f}%/{total}% [{elapsed}<{remaining}]'
+    ) as file_pbar:
+        if not no_hw and codec in ("hevc", "av1"):
+            success = run_ffmpeg_hw(
+                file_path,
+                output_path,
+                new_width,
+                new_height,
+                bitrate,
+                framerate,
+                duration,
+                file_pbar,
             )
-
-    if not success:
-        success = run_ffmpeg_sw(
-            file_path, output_path, new_width, new_height, bitrate, framerate
-        )
-
-    if success and not keep:
-        shutil.move(output_path, file_path)
-
+            if not success:
+                progress_bar.write(
+                    f"Hardware encoding failed for {file_path.name}, trying software..."
+                )
+                success = run_ffmpeg_sw(
+                    file_path,
+                    output_path,
+                    new_width,
+                    new_height,
+                    bitrate,
+                    framerate,
+                    duration,
+                    file_pbar,
+                )
+        else:
+            success = run_ffmpeg_sw(
+                file_path,
+                output_path,
+                new_width,
+                new_height,
+                bitrate,
+                framerate,
+                duration,
+                file_pbar,
+            )
+    if success:
+        if not keep:
+            shutil.move(output_path, file_path)
+        progress_bar.write(f"Successfully processed: {file_path.name}")
+    elif not process_all:
+        progress_bar.write(f"Failed to process: {file_path.name}")
+    else:
+        try:
+            file_bitrate = get_bitrate(file_path)
+            if file_bitrate < cutoff and codec not in ("hevc", "av1"):
+                progress_bar.write(f"Skipped: {file_path.name}")
+            else:
+                progress_bar.write(f"Failed to process: {file_path.name}")
+        except RuntimeError:
+            progress_bar.write(f"Failed to process: {file_path.name}")
     return success
 
 

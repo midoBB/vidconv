@@ -248,23 +248,25 @@ def run_ffmpeg_sw(
         return False
 
 
-def get_video_info(file_path: Path) -> tuple[str, int, int, float]:
+def get_video_metadata(file_path: Path) -> tuple[str, int, int, float, int, float]:
     """
-    Retrieves video stream information using ffprobe.
-
-    This function uses ffprobe to extract the codec name, width, height, and frame rate
-    of the first video stream in the given file. It parses the output of ffprobe,
-    handling cases where the frame rate is expressed as a fraction.
+    Retrieves video metadata using ffprobe, including codec, resolution, frame rate,
+    bitrate, and duration.
 
     Args:
         file_path (Path): The path to the video file.
 
     Returns:
-        tuple[str, int, int, float]: A tuple containing the video codec name, width,
-                                     height, and frame rate.
+        Tuple[str, int, int, float, int, float]: A tuple containing:
+            - codec name (str)
+            - width (int)
+            - height (int)
+            - frame rate (float)
+            - bitrate (kbps) (int)
+            - duration (seconds) (float)
 
     Raises:
-        RuntimeError: If ffprobe returns a non-zero exit code, indicating an error.
+        RuntimeError: If ffprobe returns a non-zero exit code.
     """
     cmd = [
         "ffprobe",
@@ -273,7 +275,9 @@ def get_video_info(file_path: Path) -> tuple[str, int, int, float]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name,width,height,r_frame_rate",
+        "stream=codec_name,width,height,r_frame_rate,bit_rate",
+        "-show_entries",
+        "format=duration",
         "-of",
         "csv=p=0",
         str(file_path),
@@ -283,66 +287,21 @@ def get_video_info(file_path: Path) -> tuple[str, int, int, float]:
     if result.returncode != 0:
         raise RuntimeError(f"FFprobe error: {result.stderr.decode()}")
 
-    codec, width, height, framerate = result.stdout.decode().strip().split(",")
+    metadata = result.stdout.decode().strip().split("\n")
+    stream_data, duration = metadata if len(metadata) == 2 else (metadata[0], "0")
+    codec, width, height, framerate, bitrate = stream_data.split(",")
+
+    # Parse frame rate
     if "/" in framerate:
         num, den = framerate.split("/")
         framerate = float(num) / float(den)
     else:
         framerate = float(framerate)
-    return codec, int(width), int(height), framerate
 
+    # Convert bitrate to kbps
+    bitrate_kbps = int(bitrate) // 1000 if bitrate.isdigit() else 0
 
-def get_bitrate(file_path: Path) -> int:
-    """
-    Retrieves the video bitrate in kbps using ffprobe.
-
-    Args:
-        file_path (Path): The path to the video file.
-
-    Returns:
-        int: The video bitrate in kbps.
-
-    Raises:
-        RuntimeError: If ffprobe returns a non-zero exit code, indicating an error.
-    """
-    cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=bit_rate",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(file_path),
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFprobe error: {result.stderr.decode()}")
-
-    bitrate_bps = int(result.stdout.decode().strip())
-    return bitrate_bps // 1000
-
-
-def get_duration(file_path: Path) -> float:
-    """
-    Retrieves the video duration in seconds using ffprobe.
-    """
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(file_path),
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFprobe error: {result.stderr.decode()}")
-    return float(result.stdout.decode().strip())
+    return codec, int(width), int(height), framerate, bitrate_kbps, float(duration)
 
 
 def log_error(file_path, error_msg):
@@ -387,22 +346,16 @@ def process_file(
     global current_process, current_output
 
     try:
-        codec, width, height, framerate = get_video_info(file_path)
-        duration = get_duration(file_path)
+        codec, width, height, framerate, file_bitrate, duration = get_video_metadata(
+            file_path
+        )
     except RuntimeError as e:
         progress_bar.write(f"Skipping {file_path.name}: {str(e)}")
         return False
 
     if process_all:
-        try:
-            file_bitrate = get_bitrate(file_path)
-        except RuntimeError as e:
-            progress_bar.write(f"Skipping {file_path.name}: {str(e)}")
-            return False
         if file_bitrate < cutoff and codec not in ("hevc", "av1"):
-            progress_bar.write(
-                f"Skipping {file_path.name}: bitrate {file_bitrate} is less than cutoff {cutoff} and codec is {codec}"
-            )
+            progress_bar.write(f"Skipping {file_path.name}")
             return True
 
     # Determine output path
@@ -479,7 +432,6 @@ def process_file(
         progress_bar.write(f"Failed to process: {file_path.name}")
     else:
         try:
-            file_bitrate = get_bitrate(file_path)
             if file_bitrate < cutoff and codec not in ("hevc", "av1"):
                 progress_bar.write(f"Skipped: {file_path.name}")
             else:
@@ -540,10 +492,16 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 
-    with tqdm(total=len(video_files), desc="Processing videos") as pbar:
-        for video in video_files:
-            pbar.set_postfix(file=video.name)
-            pbar.bar_format = "{l_bar}{bar}| {n}/{total} [{elapsed}]"
+    with tqdm(
+        total=len(video_files),
+        desc="Processing videos",
+        unit="Files",
+        leave=False,
+        bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}]{postfix}",
+    ) as pbar:
+        for i, video in enumerate(video_files):
+            postfix = f" {video.name}" if i > 0 else None
+            pbar.set_postfix(last_processed=postfix)
             result = process_file(
                 video, bitrate, cutoff, no_hw, keep, process_all, pbar
             )

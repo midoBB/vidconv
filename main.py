@@ -43,8 +43,6 @@ def signal_handler(sig, frame):
     sys.exit(1)
 
 
-
-
 def get_video_files(directory):
     """Get video files in directory using python-magic"""
     mime = Magic(mime=True)
@@ -56,7 +54,7 @@ def get_video_files(directory):
             if mimetype.startswith("video/"):
                 videos.append(file)
 
-    return videos
+    return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
 def get_only_video_files(inputs):
@@ -68,7 +66,7 @@ def get_only_video_files(inputs):
             mimetype = mime.from_file(input)
             if mimetype.startswith("video/"):
                 videos.append(input)
-    return videos
+    return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
 def convert_time_to_seconds(time_str):
@@ -518,7 +516,7 @@ def process_file(
 )
 def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     """Video conversion tool with hardware/software encoding support"""
-# Register signal handlers
+    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     if cutoff is None:
@@ -545,6 +543,7 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     with tqdm(total=len(video_files), desc="Processing videos") as pbar:
         for video in video_files:
             pbar.set_postfix(file=video.name)
+            pbar.bar_format = "{l_bar}{bar}| {n}/{total} [{elapsed}]"
             result = process_file(
                 video, bitrate, cutoff, no_hw, keep, process_all, pbar
             )

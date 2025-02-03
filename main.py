@@ -520,6 +520,28 @@ def process_file(
     return result, space_saved
 
 
+def check_required_tools():
+    """Check if required tools are installed and available in the system PATH."""
+    required_tools = {
+        "ffmpeg": "FFmpeg (required for video processing)",
+        "ffprobe": "FFprobe (required for video processing)",
+    }
+    missing_tools = []
+
+    for tool, description in required_tools.items():
+        if not shutil.which(tool):
+            missing_tools.append(f"{tool} ({description})")
+
+    if missing_tools:
+        console.print(
+            "[red]Error: The following required tools are not installed:[/red]"
+        )
+        for tool in missing_tools:
+            console.print(f"  - {tool}")
+        console.print("\nPlease install the missing tools and try again.")
+        sys.exit(1)
+
+
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
 @click.argument("input_path", required=False, type=click.Path(exists=True), nargs=-1)
 @click.option(
@@ -547,6 +569,7 @@ def process_file(
 )
 def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     """Video conversion tool with hardware/software encoding support"""
+    check_required_tools()
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

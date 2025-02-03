@@ -471,6 +471,7 @@ def process_file(
                 if output_path.exists():
                     output_path.unlink()
                 console.print("Hardware encoding failed, trying software...")
+                progress.update(task_id, completed=0)
                 result = run_ffmpeg_sw(
                     file_path,
                     output_path,

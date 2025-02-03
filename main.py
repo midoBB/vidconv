@@ -55,6 +55,21 @@ def signal_handler(sig, frame):
     sys.exit(1)
 
 
+def format_size(bytes: int) -> str:
+    """Convert bytes to a human-readable format."""
+    value = float(bytes)
+    if value < 0:
+        suffix = " (increase)"
+        value = -value
+    else:
+        suffix = ""
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if value < 1024.0:
+            return f"{bytes / 1024.0 ** (['B', 'KB', 'MB', 'GB', 'TB'].index(unit)):.1f} {unit}{suffix}"
+        value /= 1024.0
+    return f"{bytes / 1024.0**5:.1f} PB{suffix}"
+
+
 def get_video_files(directory):
     """Get video files in directory using python-magic"""
     mime = Magic(mime=True)
@@ -183,7 +198,9 @@ def run_ffmpeg_hw(
                     current_time = convert_time_to_seconds(time_str)
                     if duration > 0:
                         current_percent = min((current_time / duration) * 100, 100.0)
-                        task = next((t for t in progress.tasks if t.id == task_id), None)
+                        task = next(
+                            (t for t in progress.tasks if t.id == task_id), None
+                        )
                         if task is not None:
                             delta = current_percent - task.completed
                             if delta > 0:
@@ -270,7 +287,9 @@ def run_ffmpeg_sw(
                     current_time = convert_time_to_seconds(time_str)
                     if duration > 0:
                         current_percent = min((current_time / duration) * 100, 100.0)
-                        task = next((t for t in progress.tasks if t.id == task_id), None)
+                        task = next(
+                            (t for t in progress.tasks if t.id == task_id), None
+                        )
                         if task is not None:
                             delta = current_percent - task.completed
                             if delta > 0:
@@ -400,30 +419,13 @@ def process_file(
     process_all: bool,
     progress: Progress,
     task_id: TaskID,
-) -> FFmpegResult:
+) -> tuple[FFmpegResult, int]:
     """
-    Processes a single video file, converting it to a 720p resolution.
-
-    This function attempts to convert the input video file to a 720p resolution,
-    using hardware acceleration if available and enabled. It handles both horizontal
-    and vertical videos, ensuring the output maintains the correct aspect ratio.
-    The function also manages the output file path, and can optionally keep or
-    replace the original file.
-
-    Args:
-        file_path (Path): The path to the input video file.
-        bitrate (int): The target bitrate for the output video in kbps.
-        cutoff (int): The cutoff bitrate for the output video in kbps.
-        no_hw (bool): If True, disables hardware acceleration.
-        keep (bool): If True, keeps the intermediate output file; otherwise, replaces the original.
-        process_all (bool): If True, we are processing all videos in the directory.
-        progress (Progress): Rich Progress instance.
-        task_id (TaskID): Rich Task ID for progress tracking.
-
-    Returns:
-      str: "success", "failed", or "skipped"
+    Processes a single video file and returns the result along with space saved.
     """
     global current_process, current_output
+    original_size = file_path.stat().st_size
+    space_saved = 0
 
     try:
         codec, width, height, framerate, file_bitrate, duration = get_video_metadata(
@@ -431,31 +433,27 @@ def process_file(
         )
     except RuntimeError as e:
         console.print(f"Skipping {file_path.name}: {str(e)}")
-        return FFmpegResult.ERROR
+        return FFmpegResult.ERROR, 0
 
-    # If processing all files and the file bitrate is lower than cutoff (and codec is not HEVC/AV1), skip it.
     if process_all:
         if file_bitrate < cutoff and codec not in ("hevc", "av1"):
             console.print(f"Skipping {file_path.name}")
-            return FFmpegResult.SKIPPED
+            return FFmpegResult.SKIPPED, 0
 
-    # Determine output path
     output_path = file_path.with_stem(f"{file_path.stem}-720").with_suffix(".mp4")
     current_output = output_path
 
-    # Determine orientation
-    if height > width:  # Vertical
+    if height > width:
         new_height = 720
         new_width = int(width * new_height / height)
-        new_width += new_width % 2  # Ensure even width
-    else:  # Horizontal
+        new_width += new_width % 2
+    else:
         new_width = 1280
         new_height = 720
 
     if framerate > 24:
         framerate = 24
 
-    # Try hardware encoding first if enabled
     try:
         if not no_hw and codec in ("hevc", "av1"):
             result = run_ffmpeg_hw(
@@ -470,12 +468,9 @@ def process_file(
                 task_id,
             )
             if result != FFmpegResult.SUCCESS:
-                # delete the file if the hw encoding failed to be able to try again with sw encoding
                 if output_path.exists():
                     output_path.unlink()
-                console.print(
-                    f"Hardware encoding failed for {file_path.name}, trying software..."
-                )
+                console.print("Hardware encoding failed, trying software...")
                 result = run_ffmpeg_sw(
                     file_path,
                     output_path,
@@ -500,7 +495,7 @@ def process_file(
                 task_id,
             )
     except KeyboardInterrupt:
-        return FFmpegResult.ERROR
+        return FFmpegResult.ERROR, 0
     finally:
         current_process = None
         current_output = None
@@ -508,24 +503,20 @@ def process_file(
     if result == FFmpegResult.SUCCESS:
         if not keep:
             shutil.move(output_path, file_path)
-        console.print(f"Successfully processed: {file_path.name}")
-        return FFmpegResult.SUCCESS
-    elif result == FFmpegResult.SKIPPED:
-        if process_all and file_bitrate < cutoff and codec not in ("hevc", "av1"):
-            console.print(f"Skipped: {file_path.name}")
-            return FFmpegResult.SKIPPED
+            new_size = file_path.stat().st_size
         else:
-            # delete the file if all attempts failed
-            if output_path.exists():
-                output_path.unlink()
-            console.print(f"Failed to process: {file_path.name}")
-            return FFmpegResult.ERROR
+            new_size = output_path.stat().st_size
+        space_saved = original_size - new_size
+        console.print(f"Successfully processed: {file_path.name}")
+    elif result == FFmpegResult.SKIPPED:
+        space_saved = 0
     else:
-        # delete the file if all attempts failed
         if output_path.exists():
             output_path.unlink()
         console.print(f"Failed to process: {file_path.name}")
-        return FFmpegResult.ERROR
+        space_saved = 0
+
+    return result, space_saved
 
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -566,7 +557,8 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
 
     processed_files = []
     errors = 0
-    statuses = {}  # Dictionary to track status of each file by index
+    statuses = {}
+    total_space_saved = 0
 
     if process_all:
         input_path = Path.cwd()
@@ -619,18 +611,21 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
                 f"Converting {video.name}", total=100, start=False
             )
             progress.start_task(file_task)
-            # Update the queue display with statuses included
-            queue_lines = "\n".join(get_queue_display(i, video_files, statuses))
+            queue_display = get_queue_display(i, video_files, statuses)
+            queue_display.append("")
+            queue_display.append(f"Total space saved: {format_size(total_space_saved)}")
+            queue_lines = "\n".join(queue_display)
             queue_panel = Panel(
                 queue_lines, title="Conversion Queue", border_style="magenta"
             )
             live.update(Group(progress, queue_panel))
-            status = process_file(
+            status, space_saved = process_file(
                 video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task
             )
+            total_space_saved += space_saved
             progress.remove_task(file_task)
-            statuses[i] = status  # Save the status ("success", "failed", "skipped")
-            if status == FFmpegResult.SUCCESS or status == FFmpegResult.SKIPPED:
+            statuses[i] = status
+            if status in (FFmpegResult.SUCCESS, FFmpegResult.SKIPPED):
                 processed_files.append(video.name)
             else:
                 errors += 1
@@ -638,6 +633,7 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
 
     # Print summary
     console.print(f"\nProcessed {len(processed_files)} files successfully")
+    console.print(f"Total space saved: {format_size(total_space_saved)}")
     if errors > 0:
         console.print(f"Encountered {errors} errors - see {ERROR_LOG} for details")
     else:

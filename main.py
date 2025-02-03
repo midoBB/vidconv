@@ -3,16 +3,28 @@ import shutil
 import signal
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import click
 from magic import Magic
-from tqdm import tqdm
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 ERROR_LOG = "vidconv_errors.log"
 # Global variables for signal handling
 current_process = None
 current_output = None
+console = Console()
 
 
 def signal_handler(sig, frame):
@@ -31,15 +43,15 @@ def signal_handler(sig, frame):
     if current_output and current_output.exists():
         try:
             current_output.unlink()
-            print(f"\nRemoved incomplete file: {current_output}")
+            console.print(f"\nRemoved incomplete file: {current_output}")
         except Exception as e:
-            print(f"\nError removing incomplete file: {e}")
+            console.print(f"\nError removing incomplete file: {e}")
 
     # Remove error log if empty
     if Path(ERROR_LOG).exists() and Path(ERROR_LOG).stat().st_size == 0:
         Path(ERROR_LOG).unlink()
 
-    print("\nExiting due to interrupt...")
+    console.print("\nExiting due to interrupt...")
     sys.exit(1)
 
 
@@ -47,25 +59,32 @@ def get_video_files(directory):
     """Get video files in directory using python-magic"""
     mime = Magic(mime=True)
     videos = []
-
-    for file in directory.iterdir():
-        if file.is_file():
-            mimetype = mime.from_file(file)
-            if mimetype.startswith("video/"):
-                videos.append(file)
+    with console.status("[bold green]Searching for video files..."):
+        for file in directory.iterdir():
+            if file.is_file():
+                mimetype = mime.from_file(file)
+                if mimetype.startswith("video/"):
+                    videos.append(file)
 
     return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
+
+
+class FFmpegResult(Enum):
+    SUCCESS = 0
+    SKIPPED = 1
+    ERROR = 2
 
 
 def get_only_video_files(inputs):
     """Get only video files from a list of inputs"""
     videos = []
     mime = Magic(mime=True)
-    for input in inputs:
-        if input.is_file():
-            mimetype = mime.from_file(input)
-            if mimetype.startswith("video/"):
-                videos.append(input)
+    with console.status("[bold green]Searching for video files..."):
+        for input in inputs:
+            if input.is_file():
+                mimetype = mime.from_file(input)
+                if mimetype.startswith("video/"):
+                    videos.append(input)
     return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
@@ -99,8 +118,9 @@ def run_ffmpeg_hw(
     bitrate,
     framerate,
     duration,
-    progress_bar: tqdm,
-):
+    progress: Progress,
+    task_id: TaskID,
+) -> FFmpegResult:
     """Run FFmpeg with hardware acceleration and track progress"""
     global current_process
     cmd = [
@@ -156,27 +176,40 @@ def run_ffmpeg_hw(
             line = line.strip()
             stderr_lines.append(line)
             if "time=" in line:
-                time_str = line.split("time=")[1].split()[0]
-                current_time = convert_time_to_seconds(time_str)
-                if duration > 0:
-                    current_percent = min((current_time / duration) * 100, 100.0)
-                    delta = current_percent - progress_bar.n
-                    if delta > 0:
-                        progress_bar.update(delta)
+                time_part = line.split("time=", 1)[1].strip()
+                time_tokens = time_part.split()
+                if time_tokens:
+                    time_str = time_tokens[0]
+                    current_time = convert_time_to_seconds(time_str)
+                    if duration > 0:
+                        current_percent = min((current_time / duration) * 100, 100.0)
+                        task = next((t for t in progress.tasks if t.id == task_id), None)
+                        if task is not None:
+                            delta = current_percent - task.completed
+                            if delta > 0:
+                                progress.update(task_id, advance=delta)
         current_process.wait()
-        progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
+        progress.update(task_id, completed=100)
         if current_process.returncode != 0:
             log_error(input_file, "\n".join(stderr_lines))
-            return False
-        return True
+            return FFmpegResult.ERROR
+        return FFmpegResult.SUCCESS
     except Exception as e:
         log_error(input_file, str(e))
-        return False
+        return FFmpegResult.ERROR
 
 
 def run_ffmpeg_sw(
-    input_file, output_file, width, height, bitrate, framerate, duration, progress_bar
-):
+    input_file,
+    output_file,
+    width,
+    height,
+    bitrate,
+    framerate,
+    duration,
+    progress: Progress,
+    task_id: TaskID,
+) -> FFmpegResult:
     """Run FFmpeg with software encoding and track progress"""
     global current_process
     cmd = [
@@ -230,22 +263,27 @@ def run_ffmpeg_sw(
             line = line.strip()
             stderr_lines.append(line)
             if "time=" in line:
-                time_str = line.split("time=")[1].split()[0]
-                current_time = convert_time_to_seconds(time_str)
-                if duration > 0:
-                    current_percent = min((current_time / duration) * 100, 100.0)
-                    delta = current_percent - progress_bar.n
-                    if delta > 0:
-                        progress_bar.update(delta)
+                time_part = line.split("time=", 1)[1].strip()
+                time_tokens = time_part.split()
+                if time_tokens:
+                    time_str = time_tokens[0]
+                    current_time = convert_time_to_seconds(time_str)
+                    if duration > 0:
+                        current_percent = min((current_time / duration) * 100, 100.0)
+                        task = next((t for t in progress.tasks if t.id == task_id), None)
+                        if task is not None:
+                            delta = current_percent - task.completed
+                            if delta > 0:
+                                progress.update(task_id, advance=delta)
         current_process.wait()
-        progress_bar.update(100 - progress_bar.n)  # Ensure we reach 100%
+        progress.update(task_id, completed=100)
         if current_process.returncode != 0:
             log_error(input_file, "\n".join(stderr_lines))
-            return False
-        return True
+            return FFmpegResult.ERROR
+        return FFmpegResult.SUCCESS
     except Exception as e:
         log_error(input_file, str(e))
-        return False
+        return FFmpegResult.ERROR
 
 
 def get_video_metadata(file_path: Path) -> tuple[str, int, int, float, int, float]:
@@ -312,6 +350,47 @@ def log_error(file_path, error_msg):
         f.write("-" * 40 + "\n")
 
 
+def get_queue_display(
+    current_index: int, video_files: list[Path], statuses: dict[int, str]
+) -> list[str]:
+    """
+    Return a list of strings for display showing two files before, the current file,
+    and two after, using different symbols for previously processed files based on their status.
+
+    Args:
+        current_index (int): Index of the file currently processing.
+        video_files (list[Path]): List of video files.
+        statuses (dict[int, str]): Mapping from file index to status, where the status can be:
+            "success", "failed", or "skipped".
+
+    Returns:
+        list[str]: List of strings to display in the queue.
+    """
+    start = max(0, current_index - 2)
+    end = min(len(video_files), current_index + 3)
+    lines = []
+
+    for idx in range(start, end):
+        if idx >= len(video_files):
+            continue
+        if idx < current_index:
+            status = statuses.get(idx, "pending")
+            if status == FFmpegResult.SUCCESS:
+                prefix = "[green]✓[/green]"
+            elif status == FFmpegResult.ERROR:
+                prefix = "[red]✗[/red]"
+            elif status == FFmpegResult.SKIPPED:
+                prefix = "[cyan]S[/cyan]"
+            else:
+                prefix = "[white]?[/white]"
+        elif idx == current_index:
+            prefix = "[yellow]→[/yellow]"
+        else:
+            prefix = "  "
+        lines.append(f"{prefix} {video_files[idx].name}")
+    return lines
+
+
 def process_file(
     file_path: Path,
     bitrate: int,
@@ -319,8 +398,9 @@ def process_file(
     no_hw: bool,
     keep: bool,
     process_all: bool,
-    progress_bar: tqdm,
-) -> bool:
+    progress: Progress,
+    task_id: TaskID,
+) -> FFmpegResult:
     """
     Processes a single video file, converting it to a 720p resolution.
 
@@ -337,11 +417,11 @@ def process_file(
         no_hw (bool): If True, disables hardware acceleration.
         keep (bool): If True, keeps the intermediate output file; otherwise, replaces the original.
         process_all (bool): If True, we are processing all videos in the directory.
-        progress_bar (tqdm): A tqdm progress bar object for displaying progress.
-
+        progress (Progress): Rich Progress instance.
+        task_id (TaskID): Rich Task ID for progress tracking.
 
     Returns:
-      bool: True if the processing was successful, False otherwise.
+      str: "success", "failed", or "skipped"
     """
     global current_process, current_output
 
@@ -350,13 +430,14 @@ def process_file(
             file_path
         )
     except RuntimeError as e:
-        progress_bar.write(f"Skipping {file_path.name}: {str(e)}")
-        return False
+        console.print(f"Skipping {file_path.name}: {str(e)}")
+        return FFmpegResult.ERROR
 
+    # If processing all files and the file bitrate is lower than cutoff (and codec is not HEVC/AV1), skip it.
     if process_all:
         if file_bitrate < cutoff and codec not in ("hevc", "av1"):
-            progress_bar.write(f"Skipping {file_path.name}")
-            return True
+            console.print(f"Skipping {file_path.name}")
+            return FFmpegResult.SKIPPED
 
     # Determine output path
     output_path = file_path.with_stem(f"{file_path.stem}-720").with_suffix(".mp4")
@@ -376,15 +457,26 @@ def process_file(
 
     # Try hardware encoding first if enabled
     try:
-        with tqdm(
-            total=100,
-            desc=f"Converting {file_path.name}",
-            unit="%",
-            leave=False,
-            bar_format="{l_bar}{bar}| {n:.1f}%/{total}% [{elapsed}]",
-        ) as file_pbar:
-            if not no_hw and codec in ("hevc", "av1"):
-                success = run_ffmpeg_hw(
+        if not no_hw and codec in ("hevc", "av1"):
+            result = run_ffmpeg_hw(
+                file_path,
+                output_path,
+                new_width,
+                new_height,
+                bitrate,
+                framerate,
+                duration,
+                progress,
+                task_id,
+            )
+            if result != FFmpegResult.SUCCESS:
+                # delete the file if the hw encoding failed to be able to try again with sw encoding
+                if output_path.exists():
+                    output_path.unlink()
+                console.print(
+                    f"Hardware encoding failed for {file_path.name}, trying software..."
+                )
+                result = run_ffmpeg_sw(
                     file_path,
                     output_path,
                     new_width,
@@ -392,53 +484,48 @@ def process_file(
                     bitrate,
                     framerate,
                     duration,
-                    file_pbar,
+                    progress,
+                    task_id,
                 )
-                if not success:
-                    progress_bar.write(
-                        f"Hardware encoding failed for {file_path.name}, trying software..."
-                    )
-                    success = run_ffmpeg_sw(
-                        file_path,
-                        output_path,
-                        new_width,
-                        new_height,
-                        bitrate,
-                        framerate,
-                        duration,
-                        file_pbar,
-                    )
-            else:
-                success = run_ffmpeg_sw(
-                    file_path,
-                    output_path,
-                    new_width,
-                    new_height,
-                    bitrate,
-                    framerate,
-                    duration,
-                    file_pbar,
-                )
+        else:
+            result = run_ffmpeg_sw(
+                file_path,
+                output_path,
+                new_width,
+                new_height,
+                bitrate,
+                framerate,
+                duration,
+                progress,
+                task_id,
+            )
     except KeyboardInterrupt:
-        return False
+        return FFmpegResult.ERROR
     finally:
         current_process = None
         current_output = None
-    if success:
+
+    if result == FFmpegResult.SUCCESS:
         if not keep:
             shutil.move(output_path, file_path)
-        progress_bar.write(f"Successfully processed: {file_path.name}")
-    elif not process_all:
-        progress_bar.write(f"Failed to process: {file_path.name}")
+        console.print(f"Successfully processed: {file_path.name}")
+        return FFmpegResult.SUCCESS
+    elif result == FFmpegResult.SKIPPED:
+        if process_all and file_bitrate < cutoff and codec not in ("hevc", "av1"):
+            console.print(f"Skipped: {file_path.name}")
+            return FFmpegResult.SKIPPED
+        else:
+            # delete the file if all attempts failed
+            if output_path.exists():
+                output_path.unlink()
+            console.print(f"Failed to process: {file_path.name}")
+            return FFmpegResult.ERROR
     else:
-        try:
-            if file_bitrate < cutoff and codec not in ("hevc", "av1"):
-                progress_bar.write(f"Skipped: {file_path.name}")
-            else:
-                progress_bar.write(f"Failed to process: {file_path.name}")
-        except RuntimeError:
-            progress_bar.write(f"Failed to process: {file_path.name}")
-    return success
+        # delete the file if all attempts failed
+        if output_path.exists():
+            output_path.unlink()
+        console.print(f"Failed to process: {file_path.name}")
+        return FFmpegResult.ERROR
 
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -479,42 +566,80 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
 
     processed_files = []
     errors = 0
+    statuses = {}  # Dictionary to track status of each file by index
 
     if process_all:
         input_path = Path.cwd()
         video_files = get_video_files(input_path)
-
         if not video_files:
-            click.echo("No video files found in current directory.")
+            console.print("No video files found in current directory.")
             return
     elif input_path:
+        if len(input_path) > 1:
+            process_all = True
         video_files = get_only_video_files([Path(file) for file in input_path])
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 
-    with tqdm(
-        total=len(video_files),
-        desc="Processing videos",
-        unit="Files",
-        leave=False,
-        bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}]{postfix}",
-    ) as pbar:
+    console.print("[bold]Configuration:[/bold]")
+    console.print(f"  Bitrate: [cyan]{bitrate} kbps[/cyan]")
+    console.print(f"  Cutoff: [cyan]{cutoff} kbps[/cyan]")
+    console.print(f"  Hardware Acceleration: [cyan]{not no_hw}[/cyan]")
+    console.print(f"  Keep Intermediate Files: [cyan]{keep}[/cyan]")
+    console.print(f"  Process All: [cyan]{process_all}[/cyan]")
+    console.print(f"  Files to process: [cyan]{len(video_files)}[/cyan]")
+
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        expand=True,
+    )
+
+    # Use Live to display both the progress and the conversion queue
+    with Live(
+        Group(
+            progress,
+            Panel(
+                "Queue initializing...",
+                title="Conversion Queue",
+                border_style="magenta",
+            ),
+        ),
+        refresh_per_second=4,
+        console=console,
+    ) as live:
+        total_task = progress.add_task(
+            "[cyan]Processing videos...", total=len(video_files)
+        )
         for i, video in enumerate(video_files):
-            postfix = f" {video.name}" if i > 0 else None
-            pbar.set_postfix(last_processed=postfix)
-            result = process_file(
-                video, bitrate, cutoff, no_hw, keep, process_all, pbar
+            file_task = progress.add_task(
+                f"Converting {video.name}", total=100, start=False
             )
-            if result:
+            progress.start_task(file_task)
+            # Update the queue display with statuses included
+            queue_lines = "\n".join(get_queue_display(i, video_files, statuses))
+            queue_panel = Panel(
+                queue_lines, title="Conversion Queue", border_style="magenta"
+            )
+            live.update(Group(progress, queue_panel))
+            status = process_file(
+                video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task
+            )
+            progress.remove_task(file_task)
+            statuses[i] = status  # Save the status ("success", "failed", "skipped")
+            if status == FFmpegResult.SUCCESS or status == FFmpegResult.SKIPPED:
                 processed_files.append(video.name)
             else:
                 errors += 1
-            pbar.update(1)
+            progress.update(total_task, advance=1)
 
     # Print summary
-    click.echo(f"\nProcessed {len(processed_files)} files successfully")
+    console.print(f"\nProcessed {len(processed_files)} files successfully")
     if errors > 0:
-        click.echo(f"Encountered {errors} errors - see {ERROR_LOG} for details")
+        console.print(f"Encountered {errors} errors - see {ERROR_LOG} for details")
     else:
         if Path(ERROR_LOG).exists():
             Path(ERROR_LOG).unlink()

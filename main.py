@@ -585,8 +585,8 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
         TextColumn("[bold blue]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        "Elapsed : ",
         TimeElapsedColumn(),
-        TimeRemainingColumn(),
         expand=True,
     )
 

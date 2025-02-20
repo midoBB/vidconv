@@ -346,7 +346,7 @@ def get_video_metadata(file_path: Path) -> tuple[str, int, int, float, int, floa
 
     metadata = result.stdout.decode().strip().split("\n")
     stream_data, duration = metadata if len(metadata) == 2 else (metadata[0], "0")
-    codec, width, height, framerate, bitrate = stream_data.split(",")
+    codec, width, height, framerate, bitrate = stream_data.rstrip(",").split(",")
 
     # Parse frame rate
     if "/" in framerate:

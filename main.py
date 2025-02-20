@@ -356,7 +356,10 @@ def get_video_metadata(file_path: Path) -> tuple[str, int, int, float, int, floa
         framerate = float(framerate)
 
     # Convert bitrate to kbps
-    bitrate_kbps = int(bitrate) // 1000 if bitrate.isdigit() else 0
+    if not bitrate.isnumeric():
+        bitrate_kbps = sys.maxsize
+    else:
+        bitrate_kbps = int(bitrate) // 1000
 
     return codec, int(width), int(height), framerate, bitrate_kbps, float(duration)
 

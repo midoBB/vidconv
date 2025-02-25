@@ -175,7 +175,9 @@ def run_ffmpeg_hw(
         "-keyint_min",
         "48",
         "-c:a",
-        "copy",
+        "aac",
+        "-b:a",
+        "64k",
         str(output_file),
     ]
 
@@ -264,7 +266,9 @@ def run_ffmpeg_sw(
         "-keyint_min",
         "48",
         "-c:a",
-        "copy",
+        "aac",
+        "-b:a",
+        "64k",
         str(output_file),
     ]
 

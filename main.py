@@ -70,7 +70,18 @@ def format_size(bytes: int) -> str:
     return f"{bytes / 1024.0**5:.1f} PB{suffix}"
 
 
-def get_video_files(directory):
+class FFmpegResult(Enum):
+    SUCCESS = 0
+    SKIPPED = 1
+    ERROR = 2
+
+
+class SortOption(Enum):
+    DATE = "date"
+    SIZE = "size"
+
+
+def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
     """Get video files in directory using python-magic"""
     mime = Magic(mime=True)
     videos = []
@@ -81,16 +92,12 @@ def get_video_files(directory):
                 if mimetype.startswith("video/"):
                     videos.append(file)
 
+    if sort_by == SortOption.SIZE:
+        return sorted(videos, key=lambda f: f.stat().st_size, reverse=True)
     return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
-class FFmpegResult(Enum):
-    SUCCESS = 0
-    SKIPPED = 1
-    ERROR = 2
-
-
-def get_only_video_files(inputs):
+def get_only_video_files(inputs, sort_by: SortOption = SortOption.DATE):
     """Get only video files from a list of inputs"""
     videos = []
     mime = Magic(mime=True)
@@ -100,6 +107,8 @@ def get_only_video_files(inputs):
                 mimetype = mime.from_file(input)
                 if mimetype.startswith("video/"):
                     videos.append(input)
+    if sort_by == SortOption.SIZE:
+        return sorted(videos, key=lambda f: f.stat().st_size, reverse=True)
     return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
@@ -574,7 +583,14 @@ def check_required_tools():
     is_flag=True,
     help="Process all video files in directory",
 )
-def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
+@click.option(
+    "--sort-by",
+    "-s",
+    type=click.Choice(["date", "size"], case_sensitive=False),
+    default="date",
+    help="Sort video files by date or size",
+)
+def main(input_path, bitrate, cutoff, no_hw, keep, process_all, sort_by):
     """Video conversion tool with hardware/software encoding support"""
     check_required_tools()
     # Register signal handlers
@@ -593,14 +609,14 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
 
     if process_all:
         input_path = Path.cwd()
-        video_files = get_video_files(input_path)
+        video_files = get_video_files(input_path, sort_by)
         if not video_files:
             console.print("No video files found in current directory.")
             return
     elif input_path:
         if len(input_path) > 1:
             process_all = True
-        video_files = get_only_video_files([Path(file) for file in input_path])
+        video_files = get_only_video_files([Path(file) for file in input_path], sort_by)
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 
@@ -610,6 +626,7 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all):
     console.print(f"  Hardware Acceleration: [cyan]{not no_hw}[/cyan]")
     console.print(f"  Keep Intermediate Files: [cyan]{keep}[/cyan]")
     console.print(f"  Process All: [cyan]{process_all}[/cyan]")
+    console.print(f"  Sort By: [cyan]{sort_by}[/cyan]")
     console.print(f"  Files to process: [cyan]{len(video_files)}[/cyan]")
 
     progress = Progress(

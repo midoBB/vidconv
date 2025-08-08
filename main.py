@@ -10,6 +10,7 @@ import click
 from magic import Magic
 from rich.console import Console, Group
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -423,7 +424,7 @@ def get_queue_display(
         else:
             prefix = "  "
         try:
-            filename = video_files[idx].name
+            filename = escape(video_files[idx].name)
         except (AttributeError, OSError):
             filename = "[deleted/moved]"
         lines.append(f"{prefix} {filename}")

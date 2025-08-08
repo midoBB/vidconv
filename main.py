@@ -422,7 +422,11 @@ def get_queue_display(
             prefix = "[yellow]→[/yellow]"
         else:
             prefix = "  "
-        lines.append(f"{prefix} {video_files[idx].name}")
+        try:
+            filename = video_files[idx].name
+        except (AttributeError, OSError):
+            filename = "[deleted/moved]"
+        lines.append(f"{prefix} {filename}")
     return lines
 
 
@@ -440,7 +444,18 @@ def process_file(
     Processes a single video file and returns the result along with space saved.
     """
     global current_process, current_output
-    original_size = file_path.stat().st_size
+    
+    # Check if file still exists
+    if not file_path.exists():
+        console.print(f"Skipping {file_path.name}: File no longer exists")
+        return FFmpegResult.SKIPPED, 0
+    
+    try:
+        original_size = file_path.stat().st_size
+    except (FileNotFoundError, OSError) as e:
+        console.print(f"Skipping {file_path.name}: Cannot access file ({e})")
+        return FFmpegResult.SKIPPED, 0
+    
     space_saved = 0
 
     try:
@@ -518,13 +533,17 @@ def process_file(
         current_output = None
 
     if result == FFmpegResult.SUCCESS:
-        if not keep:
-            shutil.move(output_path, file_path)
-            new_size = file_path.stat().st_size
-        else:
-            new_size = output_path.stat().st_size
-        space_saved = original_size - new_size
-        console.print(f"Successfully processed: {file_path.name}")
+        try:
+            if not keep:
+                shutil.move(output_path, file_path)
+                new_size = file_path.stat().st_size
+            else:
+                new_size = output_path.stat().st_size
+            space_saved = original_size - new_size
+            console.print(f"Successfully processed: {file_path.name}")
+        except (FileNotFoundError, OSError) as e:
+            console.print(f"Warning: Could not finalize {file_path.name}: {e}")
+            space_saved = 0
     elif result == FFmpegResult.SKIPPED:
         space_saved = 0
     else:

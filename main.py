@@ -3,6 +3,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import traceback
 from enum import Enum
 from pathlib import Path
 
@@ -379,11 +380,13 @@ def get_video_metadata(file_path: Path) -> tuple[str, int, int, float, int, floa
 
 
 def log_error(file_path, error_msg):
-    """Log errors to the error log file"""
+    """Log errors to the error log file with timestamp"""
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(ERROR_LOG, "a") as f:
-        f.write(f"Error processing file: {file_path}\n")
+        f.write(f"[{timestamp}] Error processing file: {file_path}\n")
         f.write(f"Error message:\n{error_msg}\n")
-        f.write("-" * 40 + "\n")
+        f.write("-" * 60 + "\n")
 
 
 def get_queue_display(
@@ -445,18 +448,18 @@ def process_file(
     Processes a single video file and returns the result along with space saved.
     """
     global current_process, current_output
-    
+
     # Check if file still exists
     if not file_path.exists():
         console.print(f"Skipping {file_path.name}: File no longer exists")
         return FFmpegResult.SKIPPED, 0
-    
+
     try:
         original_size = file_path.stat().st_size
     except (FileNotFoundError, OSError) as e:
         console.print(f"Skipping {file_path.name}: Cannot access file ({e})")
         return FFmpegResult.SKIPPED, 0
-    
+
     space_saved = 0
 
     try:
@@ -629,14 +632,14 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all, sort_by):
 
     if process_all:
         input_path = Path.cwd()
-        video_files = get_video_files(input_path, sort_by)
+        video_files = get_video_files(input_path, SortOption(sort_by))
         if not video_files:
             console.print("No video files found in current directory.")
             return
     elif input_path:
         if len(input_path) > 1:
             process_all = True
-        video_files = get_only_video_files([Path(file) for file in input_path], sort_by)
+        video_files = get_only_video_files([Path(file) for file in input_path], SortOption(sort_by))
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 
@@ -675,29 +678,47 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all, sort_by):
             "[cyan]Processing videos...", total=len(video_files)
         )
         for i, video in enumerate(video_files):
-            file_task = progress.add_task(
-                f"Converting {video.name}", total=100, start=False
-            )
-            progress.start_task(file_task)
-            queue_display = get_queue_display(i, video_files, statuses)
-            queue_display.append("")
-            queue_display.append(f"Total space saved: {format_size(total_space_saved)}")
-            queue_lines = "\n".join(queue_display)
-            queue_panel = Panel(
-                queue_lines, title="Conversion Queue", border_style="magenta"
-            )
-            live.update(Group(progress, queue_panel))
-            status, space_saved = process_file(
-                video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task
-            )
-            total_space_saved += space_saved
-            progress.remove_task(file_task)
-            statuses[i] = status
-            if status in (FFmpegResult.SUCCESS, FFmpegResult.SKIPPED):
-                processed_files.append(video.name)
-            else:
+            file_task = None
+            try:
+                file_task = progress.add_task(
+                    f"Converting {video.name}", total=100, start=False
+                )
+                progress.start_task(file_task)
+                queue_display = get_queue_display(i, video_files, statuses)
+                queue_display.append("")
+                queue_display.append(f"Total space saved: {format_size(total_space_saved)}")
+                queue_lines = "\n".join(queue_display)
+                queue_panel = Panel(
+                    queue_lines, title="Conversion Queue", border_style="magenta"
+                )
+                live.update(Group(progress, queue_panel))
+                status, space_saved = process_file(
+                    video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task
+                )
+                total_space_saved += space_saved
+                statuses[i] = status
+                if status in (FFmpegResult.SUCCESS, FFmpegResult.SKIPPED):
+                    processed_files.append(video.name)
+                else:
+                    errors += 1
+            except Exception as e:
+                # Log the unexpected error with full traceback
+                error_msg = f"Unexpected error processing {video.name} (file {i+1}/{len(video_files)}):\n"
+                error_msg += f"Exception type: {type(e).__name__}\n"
+                error_msg += f"Exception message: {str(e)}\n"
+                error_msg += f"Full traceback:\n{traceback.format_exc()}"
+                log_error(video, error_msg)
+
+                # Mark as error and continue
+                statuses[i] = FFmpegResult.ERROR
                 errors += 1
-            progress.update(total_task, advance=1)
+                console.print(f"[red]Unexpected error processing {video.name}: {str(e)}[/red]")
+                console.print("[yellow]Continuing with next file...[/yellow]")
+            finally:
+                # Always clean up the progress task
+                if file_task is not None:
+                    progress.remove_task(file_task)
+                progress.update(total_task, advance=1)
 
     # Print summary
     console.print(f"\nProcessed {len(processed_files)} files successfully")

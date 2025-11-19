@@ -8,7 +8,6 @@ from enum import Enum
 from pathlib import Path
 
 import click
-from magic import Magic
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markup import escape
@@ -83,14 +82,29 @@ class SortOption(Enum):
     SIZE = "size"
 
 
+def get_mime_type(file_path: Path) -> str:
+    """Get MIME type using 'file' command"""
+    try:
+        result = subprocess.run(
+            ["file", "--mime-type", "-b", str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+
 def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
-    """Get video files in directory using python-magic"""
-    mime = Magic(mime=True)
+    """Get video files in directory using file command"""
     videos = []
     with console.status("[bold green]Searching for video files..."):
         for file in directory.iterdir():
             if file.is_file():
-                mimetype = mime.from_file(file)
+                mimetype = get_mime_type(file)
                 if mimetype.startswith("video/"):
                     videos.append(file)
 
@@ -102,11 +116,10 @@ def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
 def get_only_video_files(inputs, sort_by: SortOption = SortOption.DATE):
     """Get only video files from a list of inputs"""
     videos = []
-    mime = Magic(mime=True)
     with console.status("[bold green]Searching for video files..."):
         for input in inputs:
             if input.is_file():
-                mimetype = mime.from_file(input)
+                mimetype = get_mime_type(input)
                 if mimetype.startswith("video/"):
                     videos.append(input)
     if sort_by == SortOption.SIZE:
@@ -564,6 +577,7 @@ def check_required_tools():
     required_tools = {
         "ffmpeg": "FFmpeg (required for video processing)",
         "ffprobe": "FFprobe (required for video processing)",
+        "file": "file (required for MIME type detection)",
     }
     missing_tools = []
 

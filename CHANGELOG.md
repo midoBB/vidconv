@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] - 2025-11-19
+
+### Changed
+
+- Replace python-magic with system 'file' command
+
 ## [1.0.10] - 2025-08-08
 
 ### Fixed
@@ -82,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhance signal handling and ffmpeg process management
 - Automate release creation via GitHub Actions
 
+[1.0.12]: https://github.com/midoBB/vidconv/compare/v1.0.11..v1.0.12
 [1.0.10]: https://github.com/midoBB/vidconv/compare/v1.0.9..v1.0.10
 [1.0.9]: https://github.com/midoBB/vidconv/compare/v1.0.8..v1.0.9
 [1.0.8]: https://github.com/midoBB/vidconv/compare/v1.0.7..v1.0.8

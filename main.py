@@ -6,6 +6,8 @@ import sys
 import traceback
 from enum import Enum
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 import click
 from rich.console import Console, Group
@@ -97,16 +99,30 @@ def get_mime_type(file_path: Path) -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
-
 def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
     """Get video files in directory using file command"""
     videos = []
+
     with console.status("[bold green]Searching for video files..."):
-        for file in directory.iterdir():
-            if file.is_file():
-                mimetype = get_mime_type(file)
-                if mimetype.startswith("video/"):
-                    videos.append(file)
+        files = [f for f in directory.iterdir() if f.is_file()]
+        max_workers = (os.cpu_count() or 4) * 2
+        # Process files in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(get_mime_type, file): file
+                for file in files
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_file):
+                file = future_to_file[future]
+                try:
+                    mimetype = future.result()
+                    if mimetype.startswith("video/"):
+                        videos.append(file)
+                except Exception as exc:
+                    console.print(f"[red]Error processing {file}: {exc}[/red]")
 
     if sort_by == SortOption.SIZE:
         return sorted(videos, key=lambda f: f.stat().st_size, reverse=True)

@@ -99,18 +99,38 @@ def get_mime_type(file_path: Path) -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
-def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
-    """Get video files in directory using file command"""
-    videos = []
+def get_video_metadata_with_file(file_path: Path) -> tuple[Path, str, int, int, float, int, float] | None:
+    """
+    Get video metadata for a file, returning None if it's not a video or fails.
 
-    with console.status("[bold green]Searching for video files..."):
+    Returns:
+        Tuple of (file_path, codec, width, height, framerate, bitrate_kbps, duration) or None
+    """
+    try:
+        mimetype = get_mime_type(file_path)
+        if not mimetype.startswith("video/"):
+            return None
+
+        codec, width, height, framerate, bitrate, duration = get_video_metadata(file_path)
+        return (file_path, codec, width, height, framerate, bitrate, duration)
+    except Exception:
+        # Return None for files we can't process
+        return None
+
+
+def get_video_files(directory, sort_by: SortOption = SortOption.DATE, bitrate_cutoff: int | None = None, process_all: bool = False):
+    """Get video files in directory using file command, with optional metadata pre-filtering"""
+    videos = []
+    videos_with_metadata = []
+
+    with console.status("[bold green]Searching for video files and extracting metadata..."):
         files = [f for f in directory.iterdir() if f.is_file()]
         max_workers = (os.cpu_count() or 4) * 2
         # Process files in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_file = {
-                executor.submit(get_mime_type, file): file
+                executor.submit(get_video_metadata_with_file, file): file
                 for file in files
             }
 
@@ -118,29 +138,91 @@ def get_video_files(directory, sort_by: SortOption = SortOption.DATE):
             for future in as_completed(future_to_file):
                 file = future_to_file[future]
                 try:
-                    mimetype = future.result()
-                    if mimetype.startswith("video/"):
-                        videos.append(file)
+                    result = future.result()
+                    if result is not None:
+                        file_path, codec, width, height, framerate, bitrate, duration = result
+
+                        # Apply pre-filtering if in process_all mode
+                        if process_all and bitrate_cutoff is not None:
+                            if bitrate < bitrate_cutoff and codec not in ("hevc", "av1"):
+                                # Skip this file
+                                continue
+
+                        videos.append(file_path)
+                        videos_with_metadata.append({
+                            'path': file_path,
+                            'codec': codec,
+                            'width': width,
+                            'height': height,
+                            'framerate': framerate,
+                            'bitrate': bitrate,
+                            'duration': duration
+                        })
                 except Exception as exc:
                     console.print(f"[red]Error processing {file}: {exc}[/red]")
 
     if sort_by == SortOption.SIZE:
-        return sorted(videos, key=lambda f: f.stat().st_size, reverse=True)
-    return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
+        sorted_indices = sorted(range(len(videos)), key=lambda i: videos[i].stat().st_size, reverse=True)
+    else:
+        sorted_indices = sorted(range(len(videos)), key=lambda i: videos[i].stat().st_mtime, reverse=True)
+
+    videos = [videos[i] for i in sorted_indices]
+    videos_with_metadata = [videos_with_metadata[i] for i in sorted_indices]
+
+    return videos, videos_with_metadata
 
 
-def get_only_video_files(inputs, sort_by: SortOption = SortOption.DATE):
-    """Get only video files from a list of inputs"""
+def get_only_video_files(inputs, sort_by: SortOption = SortOption.DATE, bitrate_cutoff: int | None = None, process_all: bool = False):
+    """Get only video files from a list of inputs, with optional metadata pre-filtering"""
     videos = []
-    with console.status("[bold green]Searching for video files..."):
-        for input in inputs:
-            if input.is_file():
-                mimetype = get_mime_type(input)
-                if mimetype.startswith("video/"):
-                    videos.append(input)
+    videos_with_metadata = []
+
+    with console.status("[bold green]Searching for video files and extracting metadata..."):
+        max_workers = (os.cpu_count() or 4) * 2
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(get_video_metadata_with_file, input): input
+                for input in inputs
+                if input.is_file()
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_file):
+                file = future_to_file[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        file_path, codec, width, height, framerate, bitrate, duration = result
+
+                        # Apply pre-filtering if in process_all mode
+                        if process_all and bitrate_cutoff is not None:
+                            if bitrate < bitrate_cutoff and codec not in ("hevc", "av1"):
+                                # Skip this file
+                                continue
+
+                        videos.append(file_path)
+                        videos_with_metadata.append({
+                            'path': file_path,
+                            'codec': codec,
+                            'width': width,
+                            'height': height,
+                            'framerate': framerate,
+                            'bitrate': bitrate,
+                            'duration': duration
+                        })
+                except Exception as exc:
+                    console.print(f"[red]Error processing {file}: {exc}[/red]")
+
     if sort_by == SortOption.SIZE:
-        return sorted(videos, key=lambda f: f.stat().st_size, reverse=True)
-    return sorted(videos, key=lambda f: f.stat().st_mtime, reverse=True)
+        sorted_indices = sorted(range(len(videos)), key=lambda i: videos[i].stat().st_size, reverse=True)
+    else:
+        sorted_indices = sorted(range(len(videos)), key=lambda i: videos[i].stat().st_mtime, reverse=True)
+
+    videos = [videos[i] for i in sorted_indices]
+    videos_with_metadata = [videos_with_metadata[i] for i in sorted_indices]
+
+    return videos, videos_with_metadata
 
 
 def convert_time_to_seconds(time_str):
@@ -472,6 +554,7 @@ def process_file(
     process_all: bool,
     progress: Progress,
     task_id: TaskID,
+    metadata_cache: dict | None = None,
 ) -> tuple[FFmpegResult, int]:
     """
     Processes a single video file and returns the result along with space saved.
@@ -491,14 +574,25 @@ def process_file(
 
     space_saved = 0
 
-    try:
-        codec, width, height, framerate, file_bitrate, duration = get_video_metadata(
-            file_path
-        )
-    except RuntimeError as e:
-        console.print(f"Skipping {file_path.name}: {str(e)}")
-        return FFmpegResult.ERROR, 0
+    # Try to use cached metadata if available
+    if metadata_cache and file_path in metadata_cache:
+        cached = metadata_cache[file_path]
+        codec = cached['codec']
+        width = cached['width']
+        height = cached['height']
+        framerate = cached['framerate']
+        file_bitrate = cached['bitrate']
+        duration = cached['duration']
+    else:
+        try:
+            codec, width, height, framerate, file_bitrate, duration = get_video_metadata(
+                file_path
+            )
+        except RuntimeError as e:
+            console.print(f"Skipping {file_path.name}: {str(e)}")
+            return FFmpegResult.ERROR, 0
 
+    # Skip condition check (already done during discovery for process_all, but keep for safety)
     if process_all:
         if file_bitrate < cutoff and codec not in ("hevc", "av1"):
             console.print(f"Skipping {file_path.name}")
@@ -659,17 +753,24 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all, sort_by):
     errors = 0
     statuses = {}
     total_space_saved = 0
+    metadata_cache = {}
 
     if process_all:
         input_path = Path.cwd()
-        video_files = get_video_files(input_path, SortOption(sort_by))
+        video_files, videos_metadata = get_video_files(input_path, SortOption(sort_by), cutoff, process_all)
         if not video_files:
             console.print("No video files found in current directory.")
             return
+        # Cache metadata for later use
+        for metadata in videos_metadata:
+            metadata_cache[metadata['path']] = metadata
     elif input_path:
         if len(input_path) > 1:
             process_all = True
-        video_files = get_only_video_files([Path(file) for file in input_path], SortOption(sort_by))
+        video_files, videos_metadata = get_only_video_files([Path(file) for file in input_path], SortOption(sort_by), cutoff, process_all)
+        # Cache metadata for later use
+        for metadata in videos_metadata:
+            metadata_cache[metadata['path']] = metadata
     else:
         raise click.UsageError("Must specify INPUT_PATH or use --all")
 
@@ -723,7 +824,7 @@ def main(input_path, bitrate, cutoff, no_hw, keep, process_all, sort_by):
                 )
                 live.update(Group(progress, queue_panel))
                 status, space_saved = process_file(
-                    video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task
+                    video, bitrate, cutoff, no_hw, keep, process_all, progress, file_task, metadata_cache
                 )
                 total_space_saved += space_saved
                 statuses[i] = status

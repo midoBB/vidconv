@@ -4,8 +4,8 @@ PREFIX ?= ~/.local
 all: configure build
 
 configure: requirements.txt
-	@python -m venv .venv
-	@pip3 install -r requirements.txt > /dev/null
+	@uv venv
+	@uv pip install -r requirements.txt > /dev/null
 	@echo "Configured!"
 
 generate-completions:
@@ -15,7 +15,7 @@ generate-completions:
 	@echo "Generated shell completions"
 
 build: main.py
-	@pyinstaller --onefile main.py --log-level=FATAL
+	@uv run pyinstaller --onefile main.py --log-level=FATAL
 	@cp dist/main vidconv
 	@$(MAKE) generate-completions
 	@echo "Built successfully!"

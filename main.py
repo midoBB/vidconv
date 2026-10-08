@@ -102,6 +102,7 @@ def get_mime_type(file_path: Path) -> str:
 
 def get_video_metadata_with_file(
     file_path: Path,
+    skip_converted: bool = False,
 ) -> tuple[Path, str, int, int, float, int, float] | None:
     """
     Get video metadata for a file, returning None if it's not a video or fails.
@@ -112,6 +113,9 @@ def get_video_metadata_with_file(
     try:
         mimetype = get_mime_type(file_path)
         if not mimetype.startswith("video/"):
+            return None
+
+        if skip_converted and is_already_converted(file_path):
             return None
 
         codec, width, height, framerate, bitrate, duration = get_video_metadata(
@@ -142,7 +146,9 @@ def get_video_files(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_file = {
-                executor.submit(get_video_metadata_with_file, file): file
+                executor.submit(
+                    get_video_metadata_with_file, file, process_all
+                ): file
                 for file in files
             }
 
@@ -218,7 +224,9 @@ def get_only_video_files(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_file = {
-                executor.submit(get_video_metadata_with_file, input): input
+                executor.submit(
+                    get_video_metadata_with_file, input, process_all
+                ): input
                 for input in inputs
                 if input.is_file()
             }
@@ -336,7 +344,7 @@ def run_ffmpeg_hw(
         "-r",
         str(framerate),
         "-movflags",
-        "frag_keyframe+empty_moov",
+        "frag_keyframe+empty_moov+use_metadata_tags",
         "-c:v",
         "h264_vaapi",
         "-b:v",
@@ -439,7 +447,7 @@ def run_ffmpeg_sw(
         "-preset",
         "slow",
         "-movflags",
-        "frag_keyframe+empty_moov",
+        "frag_keyframe+empty_moov+use_metadata_tags",
         "-crf",
         "20",
         "-maxrate",

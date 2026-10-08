@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.14] - 2026-10-08
+
+### Fixed
+
+- Persist the `vidconv` marker in converted MP4 files (`use_metadata_tags`) so they are recognised as already converted
+- Skip already converted files during discovery when processing multiple files or `--all`
+
 ## [1.0.13] - 2025-11-20
 
 ### Changed
@@ -94,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhance signal handling and ffmpeg process management
 - Automate release creation via GitHub Actions
 
+[1.0.14]: https://github.com/midoBB/vidconv/compare/v1.0.13..v1.0.14
 [1.0.13]: https://github.com/midoBB/vidconv/compare/v1.0.12..v1.0.13
 [1.0.12]: https://github.com/midoBB/vidconv/compare/v1.0.11..v1.0.12
 [1.0.10]: https://github.com/midoBB/vidconv/compare/v1.0.9..v1.0.10

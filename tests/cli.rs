@@ -133,6 +133,26 @@ fn replace_converts_mkv_to_mp4_tags_it_and_skips_on_rerun() {
 }
 
 #[test]
+fn in_place_mp4_replace_keeps_the_converted_file() {
+    // Regression: the original path was unlinked after the atomic rename, deleting the result.
+    require_ffmpeg!();
+    let d = tempfile::tempdir().unwrap();
+    for n in ["a.mp4", "b.mp4"] {
+        make_clip(&d.path().join(n), "640x360", 2);
+    }
+    let before = fs::metadata(d.path().join("a.mp4")).unwrap().len();
+    let o = vidconv(d.path(), &["--all"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    for n in ["a.mp4", "b.mp4"] {
+        let path = d.path().join(n);
+        assert!(path.exists(), "{n} must survive in-place conversion");
+        assert_eq!(probe(&path)["format"]["tags"]["vidconv"], "1");
+    }
+    assert!(fs::metadata(d.path().join("a.mp4")).unwrap().len() < before);
+    assert!(leftovers(d.path()).is_empty());
+}
+
+#[test]
 fn keep_never_clobbers_existing_files() {
     require_ffmpeg!();
     let d = tempfile::tempdir().unwrap();

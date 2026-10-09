@@ -260,20 +260,19 @@ pub fn process_file(ctx: &Ctx, c: &Candidate, ui: &Ui, log: &mut ErrorLog) -> Do
             return persist_free(&mut tmp, &base);
         }
         let want = out_dir.join(stem_with(stem, ".mp4"));
-        let dest = match fs::symlink_metadata(&want) {
+        // `replaced_original`: the rename already replaced the source, so it must not be removed.
+        let (dest, replaced_original) = match fs::symlink_metadata(&want) {
             Err(_) => {
                 tmp.persist_noclobber(&want)?;
-                want
+                (want, false)
             }
             Ok(m) if same_file(&m, &orig_meta) => {
                 tmp.persist_overwrite(&want)?; // atomic in-place replace (foo.mp4 -> foo.mp4)
-                want
+                (want, true)
             }
-            Ok(_) => persist_free(&mut tmp, &stem_with(stem, "-720"))?, // someone else's foo.mp4 exists
+            Ok(_) => (persist_free(&mut tmp, &stem_with(stem, "-720"))?, false), // someone else's foo.mp4 exists
         };
-        if fs::metadata(&dest)
-            .map(|m| !same_file(&m, &orig_meta))
-            .unwrap_or(true)
+        if !replaced_original
             && let Err(e) = fs::remove_file(path)
         {
             ui.error(format!(

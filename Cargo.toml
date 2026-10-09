@@ -1,6 +1,6 @@
 [package]
 name = "vidconv"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 description = "Batch-convert videos to 720p H.264/AAC MP4 with VAAPI or libx264"
 license = "MIT"

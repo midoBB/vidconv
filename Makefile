@@ -1,37 +1,32 @@
-.PHONY: configure build install run clean all
+.PHONY: build test lint install clean all completions
 
 PREFIX ?= ~/.local
-all: configure build
+all: build
 
-configure: requirements.txt
-	@uv venv
-	@uv pip install -r requirements.txt > /dev/null
-	@echo "Configured!"
-
-generate-completions:
-	@mkdir -p dist
-	@_VIDCONV_COMPLETE=bash_source ./vidconv > dist/vidconv.bash
-	@_VIDCONV_COMPLETE=zsh_source ./vidconv > dist/_vidconv.zsh
-	@echo "Generated shell completions"
-
-build: main.py
-	@uv run pyinstaller --onefile main.py --log-level=FATAL
-	@cp dist/main vidconv
-	@$(MAKE) generate-completions
+build:
+	@cargo build --release --locked
 	@echo "Built successfully!"
 
-install: build
-	@install -Dm755 vidconv $(PREFIX)/bin/vidconv
-	@install -Dm644 dist/vidconv.bash $(PREFIX)/share/bash-completion/completions/vidconv
-	@install -Dm644 dist/_vidconv.zsh ~/.zsh/completions/_vidconv
-	@echo "Installed!"
+test:
+	@cargo test --locked
 
-run: build
-	@./vidconv
+lint:
+	@cargo fmt --check
+	@cargo clippy --all-targets --locked -- -D warnings
+
+completions: build
+	@mkdir -p dist
+	@./target/release/vidconv --completions bash > dist/vidconv.bash
+	@./target/release/vidconv --completions zsh > dist/_vidconv.zsh
+	@echo "Generated shell completions"
+
+install: completions
+	@install -Dm755 target/release/vidconv $(PREFIX)/bin/vidconv
+	@install -Dm644 dist/vidconv.bash $(PREFIX)/share/bash-completion/completions/vidconv
+	@install -Dm644 dist/_vidconv.zsh $(PREFIX)/share/zsh/site-functions/_vidconv
+	@echo "Installed to $(PREFIX)!"
 
 clean:
-	@rm -rf vidconv dist build main.spec
-	@rm -rf .venv
-	@rm -rf __pycache__
-	@rm -rf *.pyc
+	@cargo clean
+	@rm -rf dist
 	@echo "Cleaned!"

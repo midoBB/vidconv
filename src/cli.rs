@@ -9,10 +9,10 @@ pub enum SortBy {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum HwMode {
-    /// VAAPI for HEVC/AV1 sources when a device works (default)
+    /// VAAPI when a device works and the source is eligible (default)
     Auto,
     Off,
-    /// VAAPI for every eligible source
+    /// VAAPI without checking that the device can decode the source codec
     Force,
 }
 

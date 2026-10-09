@@ -1,6 +1,6 @@
 # vidconv
 
-Batch-shrink videos to 720p H.264/AAC MP4. Uses VAAPI hardware encoding for HEVC/AV1 sources when available, libx264 otherwise. Converted files carry a `vidconv=1` tag and are skipped on later runs.
+Batch-shrink videos to 720p H.264/AAC MP4. Uses VAAPI hardware encoding when available, libx264 for sources VAAPI can't handle (unsupported codec, HDR, 10-bit, rotated) or if it fails. Converted files carry a `vidconv=1` tag and are skipped on later runs.
 
 ## Requirements
 

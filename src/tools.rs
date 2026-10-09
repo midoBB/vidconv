@@ -1,8 +1,10 @@
 //! External tool discovery and capability probing.
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub struct Tools {
@@ -13,6 +15,29 @@ pub struct Tools {
 pub struct Caps {
     pub tonemap: bool,
     pub vaapi_device: Option<PathBuf>,
+    /// Decode profiles `vainfo` lists for the device; `None` if vainfo is missing or unusable.
+    listed: Option<HashSet<String>>,
+    /// Per-run cache of "can VAAPI decode this source codec", filled lazily.
+    decode: Mutex<HashMap<String, bool>>,
+}
+
+impl Caps {
+    /// Whether the VAAPI device can decode `codec`, probed once per run on `sample`
+    /// (first file seen with that codec) with a 1-second hardware-only decode.
+    pub fn vaapi_decodes(&self, ffmpeg: &Path, codec: &str, sample: &Path) -> bool {
+        let Some(dev) = &self.vaapi_device else {
+            return false;
+        };
+        if let (Some(listed), Some(prefix)) = (&self.listed, profile_prefix(codec))
+            && !listed.iter().any(|p| p.starts_with(prefix))
+        {
+            return false;
+        }
+        let mut cache = self.decode.lock().unwrap();
+        *cache
+            .entry(codec.to_string())
+            .or_insert_with(|| probe_decode(ffmpeg, dev, sample))
+    }
 }
 
 fn find(name: &str) -> Option<PathBuf> {
@@ -126,20 +151,115 @@ fn detect_vaapi(ffmpeg: &Path, wanted: Option<&Path>) -> Option<PathBuf> {
     })
 }
 
+/// `vainfo` profile-name prefix for an ffmpeg codec name; `None` if unmapped.
+fn profile_prefix(codec: &str) -> Option<&'static str> {
+    Some(match codec {
+        "h264" => "VAProfileH264",
+        "hevc" => "VAProfileHEVC",
+        "av1" => "VAProfileAV1",
+        "vp9" => "VAProfileVP9",
+        "vp8" => "VAProfileVP8",
+        "mpeg2video" => "VAProfileMPEG2",
+        "vc1" => "VAProfileVC1",
+        "mjpeg" => "VAProfileJPEG",
+        _ => return None,
+    })
+}
+
+/// Profiles with a decode (VLD) entrypoint in `vainfo` output.
+fn parse_vainfo(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(_, e)| e.trim() == "VAEntrypointVLD")
+        .map(|(p, _)| p.trim().to_string())
+        .filter(|p| p.starts_with("VAProfile"))
+        .collect()
+}
+
+/// Fast pre-filter: ask `vainfo` which profiles the device can decode.
+fn list_decode_profiles(dev: &Path) -> Option<HashSet<String>> {
+    let vainfo = find("vainfo")?;
+    let out = Command::new(vainfo)
+        .args(["--display", "drm", "--device"])
+        .arg(dev)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let set = parse_vainfo(&String::from_utf8_lossy(&out.stdout));
+    (out.status.success() && !set.is_empty()).then_some(set)
+}
+
+fn succeeds_within(mut child: std::process::Child, limit: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// Decodes 1s of `sample` with output forced to VAAPI surfaces, so ffmpeg errors
+/// instead of silently falling back to software decoding.
+fn probe_decode(ffmpeg: &Path, dev: &Path, sample: &Path) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-v", "error", "-nostdin", "-init_hw_device"])
+        .arg(format!("vaapi=card:{}", dev.display()))
+        .args([
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            "card",
+            "-hwaccel_output_format",
+            "vaapi",
+            "-t",
+            "1",
+            "-i",
+        ])
+        .arg(arg_path(sample))
+        .args(["-map", "0:v:0", "-frames:v", "5", "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok_and(|c| succeeds_within(c, Duration::from_secs(10)))
+}
+
 pub fn detect(tools: &Tools, want_hw: bool, device: Option<&Path>) -> Caps {
+    let vaapi_device = if want_hw {
+        detect_vaapi(&tools.ffmpeg, device)
+    } else {
+        None
+    };
     Caps {
+        listed: vaapi_device.as_deref().and_then(list_decode_profiles),
+        vaapi_device,
         tonemap: has_filters(&tools.ffmpeg, &["zscale", "tonemap"]),
-        vaapi_device: if want_hw {
-            detect_vaapi(&tools.ffmpeg, device)
-        } else {
-            None
-        },
+        decode: Mutex::new(HashMap::new()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vainfo_output_is_parsed() {
+        let text = "vainfo: VA-API version: 1.20\n\
+            \x20     VAProfileH264Main               : VAEntrypointVLD\n\
+            \x20     VAProfileH264Main               : VAEntrypointEncSlice\n\
+            \x20     VAProfileHEVCMain10             : VAEntrypointEncSlice\n\
+            \x20     VAProfileVP9Profile0            : VAEntrypointVLD\n";
+        let set = parse_vainfo(text);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("VAProfileH264Main") && set.contains("VAProfileVP9Profile0"));
+    }
 
     #[test]
     fn leading_dash_is_protected() {

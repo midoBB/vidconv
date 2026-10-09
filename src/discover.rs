@@ -4,6 +4,7 @@ use crate::probe::{self, VideoInfo};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 const VIDEO_EXTS: &[&str] = &[
@@ -89,11 +90,25 @@ fn expand(inputs: &[PathBuf], recursive: bool) -> Vec<(PathBuf, bool)> {
     out
 }
 
-pub fn discover(inputs: &[PathBuf], o: &Opts) -> Found {
+/// Reports one finished probe when dropped, so early `?` returns are counted too.
+struct Tick<'a>(&'a AtomicUsize, usize, &'a (dyn Fn(usize, usize) + Sync));
+
+impl Drop for Tick<'_> {
+    fn drop(&mut self) {
+        (self.2)(self.0.fetch_add(1, Ordering::Relaxed) + 1, self.1);
+    }
+}
+
+/// `on_probe(done, total)` is called after each file is probed (from worker threads).
+pub fn discover(inputs: &[PathBuf], o: &Opts, on_probe: &(dyn Fn(usize, usize) + Sync)) -> Found {
     let items = expand(inputs, o.recursive);
+    let total = items.len();
+    let done = AtomicUsize::new(0);
+    on_probe(0, total);
     let results: Vec<Result<Candidate, Failure>> = items
         .par_iter()
         .map(|(path, explicit)| {
+            let _tick = Tick(&done, total, on_probe);
             let fail = |reason: String| Failure {
                 path: path.clone(),
                 reason,

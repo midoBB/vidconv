@@ -12,13 +12,12 @@ mod ui;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use cli::{Cli, HwMode};
-use console::style;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use ui::{Status, Ui, display_name, format_size};
+use ui::{Row, Status, Ui, display_name, format_size};
 
 fn main() -> ExitCode {
     match run() {
@@ -87,27 +86,27 @@ fn run() -> anyhow::Result<ExitCode> {
     let want_hw = !cli.no_hw && cli.hw != HwMode::Off;
     let caps = tools::detect(&tools, want_hw, cli.vaapi_device.as_deref());
 
-    if !cli.silent() {
-        println!("{}", style("Configuration:").bold());
-        let kv = |k: &str, v: String| println!("  {k}: {}", style(v).cyan());
-        kv("Bitrate", format!("{} kbps", cli.bitrate));
-        kv("Cutoff", format!("{cutoff} kbps"));
-        kv(
+    let ui = Ui::new(cli.silent());
+    ui.config(vec![
+        ("Bitrate", format!("{} kbps", cli.bitrate)),
+        ("Cutoff", format!("{cutoff} kbps")),
+        (
             "Hardware Acceleration",
             match &caps.vaapi_device {
                 Some(d) => format!("VAAPI ({})", d.display()),
                 None if want_hw => "unavailable, using software".into(),
                 None => "off".into(),
             },
-        );
-        kv(
+        ),
+        (
             "Keep Originals",
             (cli.keep || cli.output_dir.is_some()).to_string(),
-        );
-        kv("Process All", multi.to_string());
-        kv("Sort By", format!("{:?}", cli.sort_by).to_lowercase());
-    }
+        ),
+        ("Process All", multi.to_string()),
+        ("Sort By", format!("{:?}", cli.sort_by).to_lowercase()),
+    ]);
 
+    ui.scan_progress(0, 0);
     let found = discover::discover(
         &inputs,
         &discover::Opts {
@@ -117,6 +116,7 @@ fn run() -> anyhow::Result<ExitCode> {
             cutoff,
             sort: cli.sort_by,
         },
+        &|done, total| ui.scan_progress(done, total),
     );
     let mut errors = 0usize;
     for f in &found.failures {
@@ -130,13 +130,14 @@ fn run() -> anyhow::Result<ExitCode> {
         }
         if f.explicit {
             errors += 1;
-            eprintln!("Cannot process {msg}");
+            ui.error(format!("Cannot process {msg}"));
         } else if !cli.silent() {
-            eprintln!("Skipping {msg}");
+            ui.error(format!("Skipping {msg}"));
         }
     }
     let files = found.files;
     if files.is_empty() {
+        ui.finish();
         if !cli.silent() {
             println!("No video files to process.");
         }
@@ -146,9 +147,15 @@ fn run() -> anyhow::Result<ExitCode> {
         log.finish(errors > 0);
         return Ok(ExitCode::from(u8::from(errors > 0)));
     }
-    if !cli.silent() {
-        kv_files(files.len());
-    }
+    ui.queue(
+        files
+            .iter()
+            .map(|c| Row {
+                name: display_name(&c.path),
+                size: c.size,
+            })
+            .collect(),
+    );
 
     let ctx = process::Ctx {
         cli: &cli,
@@ -172,20 +179,14 @@ fn run() -> anyhow::Result<ExitCode> {
     };
 
     let names: Vec<String> = files.iter().map(|c| display_name(&c.path)).collect();
-    let mut statuses: Vec<Option<Status>> = vec![None; files.len()];
     let (mut ok, mut skipped, mut saved_total, mut interrupted) = (0usize, 0usize, 0i64, false);
-    let ui = Ui::new(files.len(), cli.silent());
 
     for (i, cand) in files.iter().enumerate() {
         if stop.load(Ordering::Relaxed) {
             interrupted = true;
             break;
         }
-        ui.start_file(
-            &names[i],
-            ui::queue_lines(i, &names, &statuses),
-            saved_total,
-        );
+        ui.start_file(i);
         let done = catch_unwind(AssertUnwindSafe(|| {
             process::process_file(&ctx, cand, &ui, &mut log)
         }))
@@ -203,7 +204,7 @@ fn run() -> anyhow::Result<ExitCode> {
         match done.outcome {
             process::Outcome::Success(dest) => {
                 ok += 1;
-                statuses[i] = Some(Status::Success);
+                ui.finish_file(i, Status::Success, done.saved);
                 ui.say(format!(
                     "Successfully processed: {} -> {}",
                     names[i],
@@ -218,7 +219,7 @@ fn run() -> anyhow::Result<ExitCode> {
             }
             process::Outcome::Skipped(reason) => {
                 skipped += 1;
-                statuses[i] = Some(Status::Skipped);
+                ui.finish_file(i, Status::Skipped, 0);
                 ui.say(format!("Skipping {}: {reason}", names[i]));
                 if cli.json {
                     emit(
@@ -229,7 +230,7 @@ fn run() -> anyhow::Result<ExitCode> {
             }
             process::Outcome::Failed(msg) => {
                 errors += 1;
-                statuses[i] = Some(Status::Failed);
+                ui.finish_file(i, Status::Failed, 0);
                 ui.error(format!("Failed to process: {}: {msg}", names[i]));
                 if cli.json {
                     emit(
@@ -243,7 +244,6 @@ fn run() -> anyhow::Result<ExitCode> {
                 break;
             }
         }
-        ui.finish_file();
     }
     ui.finish();
 
@@ -287,8 +287,4 @@ fn summary_json(
 
 fn emit(v: serde_json::Value) {
     println!("{v}");
-}
-
-fn kv_files(n: usize) {
-    println!("  Files to process: {}", style(n).cyan());
 }

@@ -1,7 +1,7 @@
 //! Per-file pipeline: checks → plan → encode (hw, then sw) → verify → finalize.
 use crate::cli::{Cli, HwMode};
 use crate::discover::{Candidate, below_cutoff};
-use crate::encode::{self, EncodeConfig, Job, Kind, RunOutcome, build_args};
+use crate::encode::{self, EncodeConfig, Job, Kind, Progress, RunOutcome, build_args};
 use crate::errlog::ErrorLog;
 use crate::output::{TempOutput, free_space, stem_with, unique_path};
 use crate::plan::{self, PlanOpts};
@@ -149,19 +149,22 @@ pub fn process_file(ctx: &Ctx, c: &Candidate, ui: &Ui, log: &mut ErrorLog) -> Do
             let eligible = !hdr
                 && !c.info.is_high_bit_depth()
                 && c.info.rotation == 0
-                && (mode == HwMode::Force || matches!(c.info.codec.as_str(), "hevc" | "av1"));
+                && (mode == HwMode::Force
+                    || ctx
+                        .caps
+                        .vaapi_decodes(&ctx.tools.ffmpeg, &c.info.codec, path));
             eligible.then(|| dev.clone())
         }
         _ => None,
     };
 
     let duration = c.info.duration;
-    let mut progress = |secs: f64| {
-        if duration > 0.0 {
-            ui.set_progress(secs / duration);
-        }
-    };
+    let mut progress = |p: Progress| ui.progress(&p, duration);
     let mut attempt = |kind: Kind, filters: &str, tmp: &TempOutput| {
+        ui.stage(match kind {
+            Kind::Vaapi(_) => "Encoding (VAAPI)",
+            Kind::Software => "Encoding (software)",
+        });
         let job = Job {
             input: path,
             output: tmp.path(),
@@ -181,7 +184,6 @@ pub fn process_file(ctx: &Ctx, c: &Candidate, ui: &Ui, log: &mut ErrorLog) -> Do
             }
             RunOutcome::Failed { .. } | RunOutcome::Stalled => {
                 ui.say("Hardware encoding failed, trying software...");
-                ui.set_progress(0.0);
                 attempt(Kind::Software, &sw_filters, &tmp)
             }
             other => other,
@@ -204,6 +206,7 @@ pub fn process_file(ctx: &Ctx, c: &Candidate, ui: &Ui, log: &mut ErrorLog) -> Do
     }
 
     // Verify the result before touching the original.
+    ui.stage("Verifying");
     let out_info = match probe::probe(&ctx.tools.ffprobe, tmp.path()) {
         Ok(i) => i,
         Err(e) => return fail(format!("output verification failed: {e}"), None),
@@ -233,6 +236,7 @@ pub fn process_file(ctx: &Ctx, c: &Candidate, ui: &Ui, log: &mut ErrorLog) -> Do
     }
     let saved = c.size as i64 - new_size as i64;
 
+    ui.stage("Finalizing");
     tmp.copy_attrs_from(&orig_meta);
     let stem = path.file_stem().unwrap_or(path.as_os_str());
     let mut finalize = || -> std::io::Result<PathBuf> {

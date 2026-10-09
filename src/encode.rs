@@ -244,12 +244,24 @@ fn terminate(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Run ffmpeg, reporting encoded seconds through `on_progress`.
+/// One progress sample from ffmpeg's `-progress` stream.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Progress {
+    /// Encoded media time in seconds.
+    pub secs: f64,
+    /// Encode speed relative to realtime (`2.3` = 2.3x).
+    pub speed: Option<f64>,
+    pub fps: Option<f64>,
+    /// Output bytes written so far.
+    pub bytes: Option<u64>,
+}
+
+/// Run ffmpeg, reporting progress samples through `on_progress`.
 pub fn run(
     ffmpeg: &Path,
     args: &[OsString],
     stop: &AtomicBool,
-    on_progress: &mut dyn FnMut(f64),
+    on_progress: &mut dyn FnMut(Progress),
 ) -> RunOutcome {
     let spawned = Command::new(ffmpeg)
         .args(args)
@@ -268,15 +280,27 @@ pub fn run(
     };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let (tx, rx) = mpsc::channel::<f64>();
+    let (tx, rx) = mpsc::channel::<Progress>();
     let out_thread = std::thread::spawn(move || {
+        let mut cur = Progress::default();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(us) = line
-                .strip_prefix("out_time_us=")
-                .and_then(|v| v.trim().parse::<i64>().ok())
-                && tx.send(us.max(0) as f64 / 1e6).is_err()
-            {
-                break;
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            let val = val.trim();
+            match key {
+                "fps" => cur.fps = val.parse().ok(),
+                "total_size" => cur.bytes = val.parse().ok(),
+                "speed" => cur.speed = val.trim_end_matches('x').trim().parse().ok(),
+                "out_time_us" => {
+                    if let Ok(us) = val.parse::<i64>() {
+                        cur.secs = us.max(0) as f64 / 1e6;
+                        if tx.send(cur).is_err() {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -496,9 +520,42 @@ mod tests {
             Path::new("/bin/sh"),
             &["-c".into(), "echo out_time_us=2000000; exit 0".into()],
             &stop,
-            &mut |t| assert_eq!(t, 2.0),
+            &mut |p| assert_eq!(p.secs, 2.0),
         );
         assert_eq!(r, RunOutcome::Ok);
+        let mut got = None;
+        let r = run(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "echo fps=60.0; echo total_size=1234; echo speed=2.50x; echo out_time_us=3000000"
+                    .into(),
+            ],
+            &stop,
+            &mut |p| got = Some(p),
+        );
+        assert_eq!(r, RunOutcome::Ok);
+        assert_eq!(
+            got,
+            Some(Progress {
+                secs: 3.0,
+                speed: Some(2.5),
+                fps: Some(60.0),
+                bytes: Some(1234)
+            })
+        );
+        // `speed=N/A` must not poison later samples.
+        let mut got = None;
+        run(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "echo speed=N/A; echo out_time_us=1000000".into(),
+            ],
+            &stop,
+            &mut |p| got = Some(p),
+        );
+        assert_eq!(got.map(|p| p.speed), Some(None));
         stop.store(true, Ordering::Relaxed);
         let r = run(
             Path::new("/bin/sh"),
